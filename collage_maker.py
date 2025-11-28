@@ -1,104 +1,81 @@
-// .github/workflows/daily_wallpaper.yml
-/*
-name: Daily Wallpaper Update
-
-on:
-  schedule:
-    # Run every day at 00:00 UTC (= 08:00 CST/北京时间)
-    - cron: '0 0 * * *' 
-  workflow_dispatch:
-
-jobs:
-  update_wallpaper:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install requirements
-        run: |
-          pip install requests
-
-      - name: Run wallpaper update script
-        run: |
-          python scripts/daily_wallpaper_update.py
-
-      - name: Commit and Push wallpapers
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add daily_updates/
-          git commit -m "Daily update: Add new wallpapers" || echo "Nothing to commit"
-          git push
-*/
-
-// scripts/daily_wallpaper_update.py
-/*
 import os
 import requests
-from datetime import datetime, timedelta, timezone
+import time
+import random
 
-# Constants
-WALLHAVEN_API = "https://wallhaven.cc/api/v1/search?sorting=date_added&order=desc"
-DOWNLOAD_COUNT = 5
-DAILY_DIR = "daily_updates"
+# ==========================================
+# 👇 配置区域
+# ==========================================
+KEYWORD = "nature"            # 关键词
+TOTAL_IMAGES = 500            # 最多抓取 500 张
+MAX_PAGES = 20                # 最多抓取 20 页
+PER_PAGE = 24                 # 每页数量（Wallhaven API 默认最多 24）
 
-def fetch_latest_wallpapers():
-    resp = requests.get(WALLHAVEN_API)
-    resp.raise_for_status()
-    data = resp.json()
-    wallpapers = data.get('data', [])[:DOWNLOAD_COUNT]
-    image_urls = []
-    for wp in wallpapers:
-        image_urls.append(wp['path'])
-    return image_urls
+# 自动获取桌面路径，将文件夹创建在桌面上，避免权限问题
+def get_desktop_dir():
+    # 兼容多平台，此方法适用于大多数 Windows
+    return os.path.join(os.path.expanduser("~"), 'Desktop')
 
-def save_wallpapers(image_urls, save_dir):
-    os.makedirs(save_dir, exist_ok=True)
-    for url in image_urls:
-        fname = url.split('/')[-1]
-        path = os.path.join(save_dir, fname)
-        if not os.path.exists(path):
-            r = requests.get(url, stream=True)
-            r.raise_for_status()
-            with open(path, 'wb') as f:
-                for chunk in r.iter_content(1024):
-                    f.write(chunk)
+SAVE_DIR = os.path.join(get_desktop_dir(), "Wallpapers_Download")
+# ==========================================
 
-def clean_old_directories(base_dir, keep_days=7):
-    today = datetime.now(timezone.utc).date()
-    for d in os.listdir(base_dir):
-        dir_path = os.path.join(base_dir, d)
+def download_wallpapers():
+    if not os.path.exists(SAVE_DIR):
+        os.makedirs(SAVE_DIR)
+    print(f"🔍 开始批量下载壁纸，关键词: '{KEYWORD}'，保存目录: {SAVE_DIR}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    total_downloaded = 0
+    file_index = 1
+    for page in range(1, MAX_PAGES + 1):
+        if total_downloaded >= TOTAL_IMAGES:
+            break
+        api_url = (
+            f"https://wallhaven.cc/api/v1/search?"
+            f"q={KEYWORD}&sorting=random&atleast=1920x1080"
+            f"&page={page}&purity=100"
+        )
         try:
-            date_obj = datetime.strptime(d, "%Y-%m-%d").date()
-        except Exception:
+            response = requests.get(api_url, headers=headers, timeout=15)
+            data = response.json()
+            image_list = data.get('data', [])
+        except Exception as e:
+            print(f"❌ 第 {page} 页 API 请求失败: {e}")
+            # 即使失败，也 sleep 防止短时间大流量
+            sleep_time = random.uniform(3, 5)
+            time.sleep(sleep_time)
             continue
-        if (today - date_obj).days > keep_days:
-            # Delete old directory
-            for root, dirs, files in os.walk(dir_path, topdown=False):
-                for name in files:
-                    os.remove(os.path.join(root, name))
-                for name in dirs:
-                    os.rmdir(os.path.join(root, name))
-            os.rmdir(dir_path)
 
-def main():
-    # Convert UTC now to Beijing Time (UTC+8)
-    utc_now = datetime.utcnow()
-    bj_now = utc_now + timedelta(hours=8)
-    today_str = bj_now.strftime("%Y-%m-%d")
+        for item in image_list:
+            if total_downloaded >= TOTAL_IMAGES:
+                break
+            hd_url = item.get('path')
+            if not hd_url:
+                continue
+            ext = hd_url.split('.')[-1].split('?')[0]  # 防止 url 带参数
+            file_path = os.path.join(SAVE_DIR, f"wallpaper_{file_index}.{ext}")
+            try:
+                img_data = requests.get(hd_url, headers=headers, timeout=30).content
+                with open(file_path, "wb") as f:
+                    f.write(img_data)
+                total_downloaded += 1
+                print(f"正在下载第 {total_downloaded}/{TOTAL_IMAGES} 张: {hd_url.split('/')[-1]}")
+                file_index += 1
+            except Exception as e:
+                print(f"   ⚠️ 下载失败: {e}")
+                continue
 
-    target_dir = os.path.join(DAILY_DIR, today_str)
-    image_urls = fetch_latest_wallpapers()
-    save_wallpapers(image_urls, target_dir)
-    clean_old_directories(DAILY_DIR, keep_days=7)
+        # 页内抓图结束，防止封号：随机等待 3~5 秒
+        if total_downloaded < TOTAL_IMAGES:
+            sleep_time = random.uniform(3, 5)
+            print(f"第 {page} 页处理完，休眠 {sleep_time:.1f} 秒防止被封...")
+            time.sleep(sleep_time)
+    print(f"🎉 下载完成！共抓取 {total_downloaded} 张壁纸，目录: {SAVE_DIR}")
 
-if __name__ == '__main__':
-    main()
-*/
+if __name__ == "__main__":
+    download_wallpapers()
+
+
